@@ -1,5 +1,5 @@
 """
-Train a noised image classifier on ImageNet.
+Train a noised image regressor on ImageNet.
 """
 
 import argparse
@@ -19,8 +19,8 @@ from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
     add_dict_to_argparser,
     args_to_dict,
-    classifier_and_diffusion_defaults,
-    create_classifier_and_diffusion,
+    regressor_and_diffusion_defaults,
+    create_regressor_and_diffusion,
 )
 from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
 
@@ -32,8 +32,8 @@ def main():
     logger.configure()
 
     logger.log("creating model and diffusion...")
-    model, diffusion = create_classifier_and_diffusion(
-        **args_to_dict(args, classifier_and_diffusion_defaults().keys())
+    model, diffusion = create_regressor_and_diffusion(
+        **args_to_dict(args, regressor_and_diffusion_defaults().keys())
     )
     model.to(dist_util.dev())
     if args.noised:
@@ -75,15 +75,13 @@ def main():
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         image_size=args.image_size,
-        class_cond=True,
-        random_crop=True,
+        random_crop=False #True
     )
     if args.val_data_dir:
         val_data = load_data(
             data_dir=args.val_data_dir,
             batch_size=args.batch_size,
             image_size=args.image_size,
-            class_cond=True,
         )
     else:
         val_data = None
@@ -99,11 +97,11 @@ def main():
             dist_util.load_state_dict(opt_checkpoint, map_location=dist_util.dev())
         )
 
-    logger.log("training classifier model...")
+    logger.log("training regressor model...")
 
     def forward_backward_log(data_loader, prefix="train"):
         batch, extra = next(data_loader)
-        labels = extra["y"].to(dist_util.dev())
+        deflect = extra["d"].to(dist_util.dev())
 
         batch = batch.to(dist_util.dev())
         # Noisy images
@@ -113,19 +111,20 @@ def main():
         else:
             t = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
 
-        for i, (sub_batch, sub_labels, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, labels, t)
+        for i, (sub_batch, sub_deflect, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch, deflect, t)
         ):
             logits = model(sub_batch, timesteps=sub_t)
-            loss = F.cross_entropy(logits, sub_labels, reduction="none")
+            #loss = F.cross_entropy(logits, sub_labels, reduction="none")
+            loss = F.mse_loss(logits, sub_deflect)
 
             losses = {}
             losses[f"{prefix}_loss"] = loss.detach()
             losses[f"{prefix}_acc@1"] = compute_top_k(
-                logits, sub_labels, k=1, reduction="none"
+                logits, sub_deflect, k=1, reduction="none"
             )
             losses[f"{prefix}_acc@5"] = compute_top_k(
-                logits, sub_labels, k=5, reduction="none"
+                logits, sub_deflect, k=5, reduction="none"
             )
             log_loss_dict(diffusion, sub_t, losses)
             del losses
@@ -216,7 +215,7 @@ def create_argparser():
         eval_interval=5,
         save_interval=10000,
     )
-    defaults.update(classifier_and_diffusion_defaults())
+    defaults.update(regressor_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     return parser

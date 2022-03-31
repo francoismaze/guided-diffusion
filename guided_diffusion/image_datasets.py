@@ -13,7 +13,6 @@ def load_data(
     data_dir,
     batch_size,
     image_size,
-    class_cond=False,
     deterministic=False,
     random_crop=False,
     random_flip=True,
@@ -38,19 +37,14 @@ def load_data(
     """
     if not data_dir:
         raise ValueError("unspecified data directory")
-    all_images, all_constraints = _list_image_files_recursively(data_dir)
-    classes = None
-    if class_cond:
-        # Assume classes are the first part of the filename,
-        # before an underscore.
-        class_names = [bf.basename(path).split("_")[0] for path in all_images]
-        sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
-        classes = [sorted_classes[x] for x in class_names]
+    all_images, all_constraints, all_deflections = _list_image_files_recursively(data_dir)
+    deflections = np.load(all_deflections)
+    
     dataset = ImageDataset(
         image_size,
         all_images,
         all_constraints,
-        classes=classes,
+        deflections=deflections,
         shard=MPI.COMM_WORLD.Get_rank(),
         num_shards=MPI.COMM_WORLD.Get_size(),
         random_crop=random_crop,
@@ -71,17 +65,21 @@ def load_data(
 def _list_image_files_recursively(data_dir):
     images = []
     constraints = []
+    deflections = ""
     for entry in sorted(bf.listdir(data_dir)):
         full_path = bf.join(data_dir, entry)
         ext = entry.split(".")[-1]
         if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif"]:
             images.append(full_path)
         elif "." in entry and ext.lower() in ["npy"]:
-            constraints.append(full_path)
+            if entry == "deflections.npy":
+                deflections = deflections + full_path
+            else:
+                constraints.append(full_path)
         elif bf.isdir(full_path):
             images.extend(_list_image_files_recursively(full_path))
             constraints.extend(_list_image_files_recursively(full_path))
-    return images, constraints
+    return images, constraints, deflections
 
 
 class ImageDataset(Dataset):
@@ -90,7 +88,7 @@ class ImageDataset(Dataset):
         resolution,
         image_paths,
         constraint_paths,
-        classes=None,
+        deflections,
         shard=0,
         num_shards=1,
         random_crop=False,
@@ -100,7 +98,7 @@ class ImageDataset(Dataset):
         self.resolution = resolution
         self.local_images = image_paths[shard:][::num_shards]
         self.local_constraints = constraint_paths[shard:][::num_shards]
-        self.local_classes = None if classes is None else classes[shard:][::num_shards]
+        self.local_deflections = deflections[shard:][::num_shards]
         self.random_crop = random_crop
         self.random_flip = random_flip
 
@@ -133,8 +131,7 @@ class ImageDataset(Dataset):
         #full_arr = np.concatenate((arr, constraints), axis = 2)
 
         out_dict = {}
-        if self.local_classes is not None:
-            out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+        out_dict["d"] = np.array(self.local_deflections[idx], dtype=np.float32)
         return np.transpose(arr, [2, 0, 1]).astype(np.float32), np.transpose(constraints, [2, 0, 1]).astype(np.float32), out_dict
 
 

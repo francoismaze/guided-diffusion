@@ -24,19 +24,19 @@ def diffusion_defaults():
     )
 
 
-def classifier_defaults():
+def regressor_defaults():
     """
-    Defaults for classifier models.
+    Defaults for regressor models.
     """
     return dict(
         image_size=64,
-        classifier_use_fp16=False,
-        classifier_width=128,
-        classifier_depth=2,
-        classifier_attention_resolutions="32,16,8",  # 16
-        classifier_use_scale_shift_norm=True,  # False
-        classifier_resblock_updown=True,  # False
-        classifier_pool="attention",
+        regressor_use_fp16=False,
+        regressor_width=128,
+        regressor_depth=2,
+        regressor_attention_resolutions="32,16,8",  # 16
+        regressor_use_scale_shift_norm=False,  # False
+        regressor_resblock_updown=True,  # False
+        regressor_pool="attention",
     )
 
 
@@ -65,8 +65,8 @@ def model_and_diffusion_defaults():
     return res
 
 
-def classifier_and_diffusion_defaults():
-    res = classifier_defaults()
+def regressor_and_diffusion_defaults():
+    res = regressor_defaults()
     res.update(diffusion_defaults())
     return res
 
@@ -184,15 +184,15 @@ def create_model(
     )
 
 
-def create_classifier_and_diffusion(
+def create_regressor_and_diffusion(
     image_size,
-    classifier_use_fp16,
-    classifier_width,
-    classifier_depth,
-    classifier_attention_resolutions,
-    classifier_use_scale_shift_norm,
-    classifier_resblock_updown,
-    classifier_pool,
+    regressor_use_fp16,
+    regressor_width,
+    regressor_depth,
+    regressor_attention_resolutions,
+    regressor_use_scale_shift_norm,
+    regressor_resblock_updown,
+    regressor_pool,
     learn_sigma,
     diffusion_steps,
     noise_schedule,
@@ -202,15 +202,15 @@ def create_classifier_and_diffusion(
     rescale_timesteps,
     rescale_learned_sigmas,
 ):
-    classifier = create_classifier(
+    regressor = create_regressor(
         image_size,
-        classifier_use_fp16,
-        classifier_width,
-        classifier_depth,
-        classifier_attention_resolutions,
-        classifier_use_scale_shift_norm,
-        classifier_resblock_updown,
-        classifier_pool,
+        regressor_use_fp16,
+        regressor_width,
+        regressor_depth,
+        regressor_attention_resolutions,
+        regressor_use_scale_shift_norm,
+        regressor_resblock_updown,
+        regressor_pool,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -222,18 +222,18 @@ def create_classifier_and_diffusion(
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
     )
-    return classifier, diffusion
+    return regressor, diffusion
 
 
-def create_classifier(
+def create_regressor(
     image_size,
-    classifier_use_fp16,
-    classifier_width,
-    classifier_depth,
-    classifier_attention_resolutions,
-    classifier_use_scale_shift_norm,
-    classifier_resblock_updown,
-    classifier_pool,
+    regressor_use_fp16,
+    regressor_width,
+    regressor_depth,
+    regressor_attention_resolutions,
+    regressor_use_scale_shift_norm,
+    regressor_resblock_updown,
+    regressor_pool,
 ):
     if image_size == 512:
         channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
@@ -247,22 +247,22 @@ def create_classifier(
         raise ValueError(f"unsupported image size: {image_size}")
 
     attention_ds = []
-    for res in classifier_attention_resolutions.split(","):
+    for res in regressor_attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
     return EncoderUNetModel(
         image_size=image_size,
-        in_channels=3,
-        model_channels=classifier_width,
-        out_channels=1000,
-        num_res_blocks=classifier_depth,
+        in_channels=1+3,
+        model_channels=regressor_width,
+        out_channels=1,
+        num_res_blocks=regressor_depth,
         attention_resolutions=tuple(attention_ds),
         channel_mult=channel_mult,
-        use_fp16=classifier_use_fp16,
+        use_fp16=regressor_use_fp16,
         num_head_channels=64,
-        use_scale_shift_norm=classifier_use_scale_shift_norm,
-        resblock_updown=classifier_resblock_updown,
-        pool=classifier_pool,
+        use_scale_shift_norm=regressor_use_scale_shift_norm,
+        resblock_updown=regressor_resblock_updown,
+        pool=regressor_pool,
     )
 
 
