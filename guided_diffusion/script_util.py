@@ -3,7 +3,7 @@ import inspect
 
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
-from .unet import SuperResModel, UNetModel, EncoderUNetModel
+from .unet import SuperResModel, UNetModel, EncoderUNetModel, MyRegressor
 
 NUM_CLASSES = 1000
 
@@ -13,9 +13,9 @@ def diffusion_defaults():
     Defaults for image and classifier training.
     """
     return dict(
-        learn_sigma=False,
+        learn_sigma=True,#False
         diffusion_steps=1000,
-        noise_schedule="linear",
+        noise_schedule="cosine",#"linear"
         timestep_respacing="",
         use_kl=False,
         predict_xstart=False,
@@ -34,9 +34,9 @@ def regressor_defaults():
         regressor_width=128,
         regressor_depth=2,
         regressor_attention_resolutions="32,16,8",  # 16
-        regressor_use_scale_shift_norm=False,  # False
+        regressor_use_scale_shift_norm=True,  # False
         regressor_resblock_updown=True,  # False
-        regressor_pool="attention",
+        regressor_pool="spatial",
     )
 
 

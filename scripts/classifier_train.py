@@ -23,7 +23,9 @@ from guided_diffusion.script_util import (
     create_regressor_and_diffusion,
 )
 from guided_diffusion.train_util import parse_resume_step_from_filename, log_loss_dict
+from sklearn.metrics import r2_score
 
+import matplotlib.pyplot as plt
 
 def main():
     args = create_argparser().parse_args()
@@ -58,7 +60,7 @@ def main():
     dist_util.sync_params(model.parameters())
 
     mp_trainer = MixedPrecisionTrainer(
-        model=model, use_fp16=args.classifier_use_fp16, initial_lg_loss_scale=16.0
+        model=model, use_fp16=args.regressor_use_fp16, initial_lg_loss_scale=16.0
     )
 
     model = DDP(
@@ -82,6 +84,7 @@ def main():
             data_dir=args.val_data_dir,
             batch_size=args.batch_size,
             image_size=args.image_size,
+            deterministic = False,
         )
     else:
         val_data = None
@@ -99,33 +102,40 @@ def main():
 
     logger.log("training regressor model...")
 
-    def forward_backward_log(data_loader, prefix="train"):
-        batch, extra = next(data_loader)
+    def forward_backward_log(data_loader, prefix="train", print_res=False):
+        batch, batch_cons, extra = next(data_loader)
         deflect = extra["d"].to(dist_util.dev())
-
+        
         batch = batch.to(dist_util.dev())
+        batch_cons = batch_cons.to(dist_util.dev())
         # Noisy images
         if args.noised:
             t, _ = schedule_sampler.sample(batch.shape[0], dist_util.dev())
+            #print(t)
             batch = diffusion.q_sample(batch, t)
         else:
             t = th.zeros(batch.shape[0], dtype=th.long, device=dist_util.dev())
-
-        for i, (sub_batch, sub_deflect, sub_t) in enumerate(
-            split_microbatches(args.microbatch, batch, deflect, t)
+        for i, (sub_batch, sub_batch_cons, sub_deflect, sub_t) in enumerate(
+            split_microbatches(args.microbatch, batch, batch_cons, deflect, t)
         ):
-            logits = model(sub_batch, timesteps=sub_t)
+            full_batch = th.cat((sub_batch, sub_batch_cons), dim=1)
+            logits = model(full_batch, timesteps=sub_t).reshape(sub_deflect.shape) ##WARNING !!!
+            if print_res:
+                print(logits, sub_deflect)
             #loss = F.cross_entropy(logits, sub_labels, reduction="none")
             loss = F.mse_loss(logits, sub_deflect)
-
             losses = {}
             losses[f"{prefix}_loss"] = loss.detach()
-            losses[f"{prefix}_acc@1"] = compute_top_k(
-                logits, sub_deflect, k=1, reduction="none"
-            )
-            losses[f"{prefix}_acc@5"] = compute_top_k(
-                logits, sub_deflect, k=5, reduction="none"
-            )
+            try:
+                losses[f"{prefix}_R2"] = r2_score(sub_deflect.cpu().detach().numpy(), logits.cpu().detach().numpy())
+            except ValueError:
+                losses[f"{prefix}_R2"] = th.tensor([10000.0])
+            #losses[f"{prefix}_acc@1"] = 0#compute_top_k(
+                #logits, sub_deflect, k=1, reduction="none"
+            #)
+            #losses[f"{prefix}_acc@5"] = 0#compute_top_k(
+                #logits, sub_deflect, k=5, reduction="none"
+            #)
             log_loss_dict(diffusion, sub_t, losses)
             del losses
             loss = loss.mean()
@@ -142,7 +152,7 @@ def main():
         )
         if args.anneal_lr:
             set_annealed_lr(opt, args.lr, (step + resume_step) / args.iterations)
-        forward_backward_log(data)
+        forward_backward_log(data, print_res = (step%1000 == 0))
         mp_trainer.optimize(opt)
         if val_data is not None and not step % args.eval_interval:
             with th.no_grad():
@@ -163,6 +173,9 @@ def main():
     if dist.get_rank() == 0:
         logger.log("saving model...")
         save_model(mp_trainer, opt, step + resume_step)
+        #for m in model.modules():
+        #    if isinstance(m, th.nn.Conv2d):
+                #print(m.weight)
     dist.barrier()
 
 
@@ -204,8 +217,8 @@ def create_argparser():
         val_data_dir="",
         noised=True,
         iterations=150000,
-        lr=3e-4,
-        weight_decay=0.0,
+        lr=6e-4,
+        weight_decay=0.2,
         anneal_lr=False,
         batch_size=4,
         microbatch=-1,

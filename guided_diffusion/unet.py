@@ -840,6 +840,180 @@ class EncoderUNetModel(nn.Module):
             )
         elif pool == "spatial":
             self.out = nn.Sequential(
+                #normalization(self._feature_size),#ADDED
+                #nn.SiLU(),#ADDED
+                nn.Linear(self._feature_size, 2048),
+                normalization(2048),#ADDED
+                nn.ReLU(),
+                nn.Dropout(p=dropout), #ADDED
+                nn.Linear(2048, self.out_channels),
+            )
+        elif pool == "spatial_v2":
+            self.out = nn.Sequential(
+                nn.Linear(self._feature_size, 2048),
+                normalization(2048),
+                nn.SiLU(),
+            )
+        else:
+            raise NotImplementedError(f"Unexpected {pool} pooling")
+
+    def convert_to_fp16(self):
+        """
+        Convert the torso of the model to float16.
+        """
+        self.input_blocks.apply(convert_module_to_f16)
+        self.middle_block.apply(convert_module_to_f16)
+
+    def convert_to_fp32(self):
+        """
+        Convert the torso of the model to float32.
+        """
+        self.input_blocks.apply(convert_module_to_f32)
+        self.middle_block.apply(convert_module_to_f32)
+
+    def forward(self, x, timesteps):
+        """
+        Apply the model to an input batch.
+
+        :param x: an [N x C x ...] Tensor of inputs.
+        :param timesteps: a 1-D batch of timesteps.
+        :return: an [N x K] Tensor of outputs.
+        """
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+
+        results = []
+        h = x.type(self.dtype)
+        for module in self.input_blocks:
+            h = module(h, emb)
+            if self.pool.startswith("spatial"):
+                results.append(h.type(x.dtype).mean(dim=(2, 3)))
+        h = self.middle_block(h, emb)
+        if self.pool.startswith("spatial"):
+            results.append(h.type(x.dtype).mean(dim=(2, 3)))
+            h = th.cat(results, axis=-1)
+            return self.out(h)
+        else:
+            h = h.type(x.dtype)
+            return self.out(h)
+
+class MyRegressor(nn.Module):
+    
+    def __init__(
+        self,
+        image_size,
+        in_channels,
+        model_channels,
+        out_channels,
+        num_res_blocks = 2,
+        dropout=0.2,
+        channel_mult=(1, 2, 4, 8),
+        dims=2,
+        use_checkpoint=False,
+        use_fp16=False,
+        conv_resample=True,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        use_new_attention_order=False,
+        pool="regressor"
+    ):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        self.out_channels = out_channels
+        self.num_res_blocks = num_res_blocks
+        self.dropout = dropout
+        self.conv_resample = conv_resample
+        self.channel_mult = channel_mult
+        self.use_checkpoint = use_checkpoint
+        self.dtype = th.float16 if use_fp16 else th.float32
+        
+        time_embed_dim = model_channels * 4
+        self.time_embed = nn.Sequential(
+            linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            linear(time_embed_dim, time_embed_dim),
+        )
+
+        ch = int(channel_mult[0] * model_channels)
+        self.input_blocks = nn.ModuleList(
+            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
+        )
+        self._feature_size = ch
+        input_block_chans = [ch]
+        for level, mult in enumerate(channel_mult):
+            for _ in range(num_res_blocks):
+                layers = [
+                    ResBlock(
+                        ch,
+                        time_embed_dim,
+                        dropout,
+                        out_channels=int(mult * model_channels),
+                        dims=dims,
+                        use_checkpoint=use_checkpoint,
+                        #use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                ]
+                ch = int(mult * model_channels)
+                
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                self._feature_size += ch
+                input_block_chans.append(ch)
+            if level != len(channel_mult) - 1:
+                out_ch = ch
+                self.input_blocks.append(
+                    TimestepEmbedSequential(
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=out_ch,
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            down=True,
+                        )
+                        if resblock_updown
+                        else Downsample(
+                            ch, conv_resample, dims=dims, out_channels=out_ch
+                        )
+                    )
+                )
+                ch = out_ch
+                input_block_chans.append(ch)
+                #self._feature_size += ch
+                print(self._feature_size)
+
+        self.pool = pool
+        if pool == "regressor":
+            # self.out = nn.Sequential(
+            #     normalization(ch),
+            #     nn.SiLU(),
+            #     nn.AdaptiveAvgPool2d((1, 1)),
+            #     zero_module(conv_nd(dims, ch, out_channels, 1)),
+            #     nn.Flatten(),
+            # )
+            
+            self.out = nn.Sequential(
+                normalization(ch),
+                nn.SiLU(),
+                nn.AdaptiveAvgPool2d((1, 1)),
+                zero_module(conv_nd(dims, ch, out_channels, 1)),
+                #nn.Linear(64, 32),
+                #nn.Linear(32, 1),
+                nn.Flatten(),
+            )
+        elif pool == "attention":
+            assert num_head_channels != -1
+            self.out = nn.Sequential(
+                normalization(ch),
+                nn.SiLU(),
+                AttentionPool2d(
+                    (image_size // ds), ch, num_head_channels, out_channels
+                ),
+            )
+        elif pool == "spatial":
+            self.out = nn.Sequential(
                 nn.Linear(self._feature_size, 2048),
                 nn.ReLU(),
                 nn.Linear(2048, self.out_channels),
@@ -884,11 +1058,12 @@ class EncoderUNetModel(nn.Module):
             h = module(h, emb)
             if self.pool.startswith("spatial"):
                 results.append(h.type(x.dtype).mean(dim=(2, 3)))
-        h = self.middle_block(h, emb)
+        #h = self.middle_block(h, emb)
         if self.pool.startswith("spatial"):
             results.append(h.type(x.dtype).mean(dim=(2, 3)))
             h = th.cat(results, axis=-1)
             return self.out(h)
         else:
             h = h.type(x.dtype)
+            print(h.shape)
             return self.out(h)

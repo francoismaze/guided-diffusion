@@ -15,7 +15,7 @@ def load_data(
     image_size,
     deterministic=False,
     random_crop=False,
-    random_flip=True,
+    random_flip=False,
 ):
     """
     For a dataset, create a generator over (images, kwargs) pairs.
@@ -72,7 +72,7 @@ def _list_image_files_recursively(data_dir):
         if "." in entry and ext.lower() in ["jpg", "jpeg", "png", "gif"]:
             images.append(full_path)
         elif "." in entry and ext.lower() in ["npy"]:
-            if entry == "deflections.npy":
+            if entry == "deflections_log.npy":
                 deflections = deflections + full_path
             else:
                 constraints.append(full_path)
@@ -92,7 +92,7 @@ class ImageDataset(Dataset):
         shard=0,
         num_shards=1,
         random_crop=False,
-        random_flip=True,
+        random_flip=False,
     ):
         super().__init__()
         self.resolution = resolution
@@ -108,6 +108,11 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx):
         image_path = self.local_images[idx]
         constraint_path = self.local_constraints[idx]
+        num_im = int((image_path.split("_")[-1]).split(".")[0])
+        num_cons = int((constraint_path.split("_")[-1]).split(".")[0])
+        assert num_im == num_cons, "Problem while loading the images and constraints"
+        #print(num_im, num_cons)
+        #print(image_path, constraint_path)
         with bf.BlobFile(image_path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()
@@ -121,9 +126,9 @@ class ImageDataset(Dataset):
         if self.random_flip and random.random() < 0.5:
             arr = arr[:, ::-1]
 
-        #arr = arr.astype(np.float32) / 127.5 - 1
         arr = np.mean(arr, axis = 2)
-        arr = arr.astype(np.float32) / 255
+        arr = arr.astype(np.float32) / 127.5 - 1
+        #arr = arr.astype(np.float32) / 255
         arr = arr.reshape(self.resolution, self.resolution, 1)
 
         constraints = np.load(constraint_path)
@@ -131,7 +136,7 @@ class ImageDataset(Dataset):
         #full_arr = np.concatenate((arr, constraints), axis = 2)
 
         out_dict = {}
-        out_dict["d"] = np.array(self.local_deflections[idx], dtype=np.float32)
+        out_dict["d"] = np.array(self.local_deflections[num_im], dtype=np.float32)
         return np.transpose(arr, [2, 0, 1]).astype(np.float32), np.transpose(constraints, [2, 0, 1]).astype(np.float32), out_dict
 
 
